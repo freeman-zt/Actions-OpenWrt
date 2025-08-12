@@ -1,8 +1,8 @@
-#
+0#
 # https://github.com/P3TERX/Actions-OpenWrt
 #
-# File: .github/workflows/openwrt-bulder.yml
-# Description: Build OpenWrt using GitHub Actions
+# File: .github/workflows/openwrt-docker-builder.yml
+# Description: Build OpenWrt using GitHub Actions with Docker
 #
 # Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
 #
@@ -10,7 +10,7 @@
 # See /LICENSE for more information.
 #
 
-name: OpenWrt Builder
+name: OpenWrt Docker Builder
 
 on:
   repository_dispatch:
@@ -37,77 +37,9 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
-    - name: Create Dockerfile
+    - name: Create base Dockerfile
       run: |
         cat > Dockerfile <<EOF
-        FROM ubuntu:22.04
-        
-        ENV DEBIAN_FRONTEND=noninteractive
-        ENV TZ=Asia/Shanghai
-        
-        RUN rm -rf /etc/apt/sources.list.d/* && \
-            apt-get -qq update && \
-            apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-            bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-            git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
-            libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev \
-            libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 \
-            python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo \
-            uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev && \
-            apt-get -qq autoremove --purge && \
-            apt-get -qq clean
-        
-        RUN mkdir -p /workdir
-        WORKDIR /workdir
-        
-        CMD ["/bin/bash"]
-        EOF
-        
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
-
-    - name: Clone source code
-      working-directory: /workdir
-      run: |
-        df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH --depth=1 openwrt
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-
-    - name: Download package
-      id: package
-      run: |
-        cd openwrt
-        make defconfig
-        make download -j8
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-
-    # 创建包含OpenWrt源码和编译环境的Docker镜像
-    - name: Create OpenWrt Docker image
-      run: |
-        # 创建包含OpenWrt源码和编译环境的Dockerfile
-        cat > Dockerfile.openwrt <<EOF
         FROM ubuntu:22.04
         
         ENV DEBIAN_FRONTEND=noninteractive
@@ -130,15 +62,46 @@ jobs:
         RUN mkdir -p /workdir
         WORKDIR /workdir
         
-        # 复制OpenWrt源码到镜像中
-        COPY openwrt /workdir/openwrt
+        # 复制自定义脚本
+        COPY $DIY_P1_SH /workdir/
+        COPY $DIY_P2_SH /workdir/
+        COPY $FEEDS_CONF /workdir/ 2>/dev/null || true
+        COPY $CONFIG_FILE /workdir/ 2>/dev/null || true
+        COPY files /workdir/files/ 2>/dev/null || true
         
         CMD ["/bin/bash"]
         EOF
-        
-        # 构建Docker镜像
-        docker build -f Dockerfile.openwrt -t ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest .
+
+    - name: Build base Docker image
+      run: |
+        docker build -t base-builder .
+
+    - name: Prepare OpenWrt source in Docker
+      run: |
+        docker run --name openwrt-prep base-builder /bin/bash -c "
+          cd /workdir &&
+          git clone $REPO_URL -b $REPO_BRANCH --depth=1 openwrt &&
+          cd openwrt &&
+          [ -e /workdir/$FEEDS_CONF ] && mv /workdir/$FEEDS_CONF feeds.conf.default &&
+          chmod +x /workdir/$DIY_P1_SH &&
+          /workdir/$DIY_P1_SH &&
+          ./scripts/feeds update -a &&
+          ./scripts/feeds install -a &&
+          [ -e /workdir/files ] && mv /workdir/files files &&
+          [ -e /workdir/$CONFIG_FILE ] && mv /workdir/$CONFIG_FILE .config &&
+          chmod +x /workdir/$DIY_P2_SH &&
+          /workdir/$DIY_P2_SH &&
+          make defconfig &&
+          make download -j8 &&
+          find dl -size -1024c -exec ls -l {} \; &&
+          find dl -size -1024c -exec rm -f {} \;
+        "
+
+    - name: Commit Docker container to image
+      run: |
+        docker commit openwrt-prep ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest
         docker tag ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ github.run_number }}
+        docker rm openwrt-prep
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -148,22 +111,55 @@ jobs:
 
     - name: Push Docker image to Docker Hub
       run: |
+        echo "推送Docker镜像到Docker Hub..."
         docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest
         docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ github.run_number }}
+        echo "Docker镜像推送完成！"
 
-    - name: Compile the firmware
+    - name: Compile the firmware in Docker
       id: compile
       run: |
-        docker run --rm -v $GITHUB_WORKSPACE/openwrt:/workdir/openwrt ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest /bin/bash -c "cd /workdir/openwrt && echo -e \"$(nproc) thread compile\" && make -j8"
+        echo "开始在Docker容器中编译固件..."
+        docker run --name openwrt-compile ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest /bin/bash -c "
+          cd /workdir/openwrt &&
+          echo -e \"$(nproc) thread compile\" &&
+          make -j8
+        "
+        
+        # 从容器中复制编译结果和配置文件
+        mkdir -p openwrt
+        docker cp openwrt-compile:/workdir/openwrt/bin ./openwrt/
+        docker cp openwrt-compile:/workdir/openwrt/.config ./openwrt/
+        
+        # 保存完整的配置文件
+        mkdir -p configs
+        docker cp openwrt-compile:/workdir/openwrt/.config ./configs/openwrt.config
+        
+        # 尝试复制内核配置文件（如果存在）
+        docker exec openwrt-compile find /workdir/openwrt -name ".config" -path "*/build_dir/target-*/linux-*/linux-*" -exec cp {} /tmp/kernel.config \; 2>/dev/null || true
+        docker cp openwrt-compile:/tmp/kernel.config ./configs/kernel.config 2>/dev/null || echo "内核配置文件未找到"
+        
+        # 复制feeds配置
+        docker cp openwrt-compile:/workdir/openwrt/feeds.conf.default ./configs/feeds.conf.default 2>/dev/null || true
+        
         cd openwrt
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        
+        docker rm openwrt-compile
 
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
+
+    - name: Upload configuration files
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_configs${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: configs/
 
     - name: Upload bin directory
       uses: actions/upload-artifact@main
@@ -194,8 +190,21 @@ jobs:
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
+        echo "🐳 Docker镜像: \`docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ github.run_number }}\`" >> release.txt
+        echo "" >> release.txt
+        echo "📋 配置文件说明:" >> release.txt
+        echo "- openwrt.config: OpenWrt主配置文件" >> release.txt
+        echo "- kernel.config: 内核配置文件（如果可用）" >> release.txt
+        echo "- feeds.conf.default: Feeds配置文件" >> release.txt
         [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Prepare release files
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      run: |
+        mkdir -p release_files
+        cp -r ${{ env.FIRMWARE }}/* release_files/ 2>/dev/null || true
+        cp -r configs/* release_files/ 2>/dev/null || true
 
     - name: Upload firmware to release
       uses: softprops/action-gh-release@master
@@ -205,7 +214,7 @@ jobs:
       with:
         tag_name: ${{ steps.tag.outputs.release_tag }}
         body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
+        files: release_files/*
 
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@main
