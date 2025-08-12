@@ -36,9 +36,29 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
+    - name: Prepare build context
+      run: |
+        # 创建构建上下文目录
+        mkdir -p docker-context
+        
+        # 复制必需的脚本文件
+        cp $DIY_P1_SH docker-context/ 2>/dev/null || echo "#!/bin/bash" > docker-context/$DIY_P1_SH
+        cp $DIY_P2_SH docker-context/ 2>/dev/null || echo "#!/bin/bash" > docker-context/$DIY_P2_SH
+        
+        # 复制可选的配置文件（如果不存在则创建空文件）
+        cp $FEEDS_CONF docker-context/ 2>/dev/null || touch docker-context/$FEEDS_CONF
+        cp $CONFIG_FILE docker-context/ 2>/dev/null || touch docker-context/$CONFIG_FILE
+        
+        # 复制files目录（如果不存在则创建空目录）
+        if [ -d files ]; then
+          cp -r files docker-context/
+        else
+          mkdir -p docker-context/files
+        fi
+
     - name: Create base Dockerfile
       run: |
-        cat > Dockerfile <<EOF
+        cat > docker-context/Dockerfile <<EOF
         FROM ubuntu:22.04
         
         ENV DEBIAN_FRONTEND=noninteractive
@@ -55,19 +75,19 @@ jobs:
         RUN mkdir -p /workdir
         WORKDIR /workdir
         
-        # 复制自定义脚本
+        # 复制文件
         COPY $DIY_P1_SH /workdir/
         COPY $DIY_P2_SH /workdir/
-        COPY $FEEDS_CONF /workdir/ 2>/dev/null || true
-        COPY $CONFIG_FILE /workdir/ 2>/dev/null || true
-        COPY files /workdir/files/ 2>/dev/null || true
+        COPY $FEEDS_CONF /workdir/
+        COPY $CONFIG_FILE /workdir/
+        COPY files /workdir/files/
         
         CMD ["/bin/bash"]
         EOF
 
     - name: Build base Docker image
       run: |
-        docker build -t base-builder .
+        docker build -t base-builder docker-context/
 
     - name: Prepare OpenWrt source in Docker
       run: |
